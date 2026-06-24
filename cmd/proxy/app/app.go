@@ -33,6 +33,10 @@ import (
 	"sync"
 	"time"
 
+	"os"
+	"os/signal"
+	"syscall"
+
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/desertbit/grumble"
 	"github.com/hashicorp/yamux"
@@ -43,6 +47,8 @@ import (
 	"github.com/nicocha30/ligolo-ng/pkg/proxy"
 	"github.com/nicocha30/ligolo-ng/pkg/proxy/netstack"
 	"github.com/sirupsen/logrus"
+	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 var AgentList map[int]*controller.LigoloAgent
@@ -395,6 +401,73 @@ func StartTunnel(agent *controller.LigoloAgent, tunName string) error {
 	}()
 
 	return nil
+}
+
+// rsshDial connects to the agent's embedded SSH server and opens an interactive
+// PTY shell session, handing over the proxy terminal until the session ends.
+func rsshDial(addr, password string) error {
+	cfg := &gossh.ClientConfig{
+		User:            "ligolo",
+		Auth:            []gossh.AuthMethod{gossh.Password(password)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}
+
+	client, err := gossh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	// Put the local terminal into raw mode.
+	fd := int(os.Stdin.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return fmt.Errorf("could not set raw terminal: %v", err)
+	}
+	defer term.Restore(fd, oldState)
+
+	w, h, _ := term.GetSize(fd)
+
+	if err := session.RequestPty("xterm-256color", h, w, gossh.TerminalModes{
+		gossh.ECHO:          1,
+		gossh.TTY_OP_ISPEED: 14400,
+		gossh.TTY_OP_OSPEED: 14400,
+	}); err != nil {
+		return fmt.Errorf("pty request failed: %v", err)
+	}
+
+	session.Stdin = os.Stdin
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+
+	if err := session.Shell(); err != nil {
+		return fmt.Errorf("shell request failed: %v", err)
+	}
+
+	// Forward SIGWINCH (terminal resize) to the remote PTY.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGWINCH)
+	go func() {
+		for range sigCh {
+			w, h, err := term.GetSize(fd)
+			if err == nil {
+				session.WindowChange(h, w)
+			}
+		}
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		close(sigCh)
+	}()
+
+	return session.Wait()
 }
 
 func Run() {
@@ -852,13 +925,26 @@ App.AddCommand(&grumble.Command{
 			if err := currentAgent.StartRssh(req); err != nil {
 				return err
 			}
-			mode := "bind"
-			addr := fmt.Sprintf(":%d", req.Port)
-			if req.LHost != "" {
-				mode = "reverse"
-				addr = fmt.Sprintf("%s:%d → bport %d", req.LHost, req.Port, req.BPort)
+
+			if req.NoShell {
+				logrus.Infof("Reverse-SSH server started on agent (port %d, no-shell mode)", req.Port)
+				return nil
 			}
-			logrus.Infof("Reverse-SSH server started on agent (%s mode, %s)", mode, addr)
+
+			// Extract agent IP and dial the SSH server for an interactive shell.
+			agentHost, _, err := net.SplitHostPort(currentAgent.Session.RemoteAddr().String())
+			if err != nil {
+				return fmt.Errorf("could not parse agent address: %v", err)
+			}
+			sshAddr := net.JoinHostPort(agentHost, fmt.Sprintf("%d", req.Port))
+
+			// Give the agent a moment to start listening.
+			time.Sleep(300 * time.Millisecond)
+
+			logrus.Infof("Connecting to agent SSH server at %s ...", sshAddr)
+			if err := rsshDial(sshAddr, req.Password); err != nil {
+				return fmt.Errorf("rssh session ended: %v", err)
+			}
 			return nil
 		},
 	})
