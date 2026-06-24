@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -371,10 +372,25 @@ func HandleConn(conn net.Conn) {
 		req := e.Payload.(*protocol.RsshStartRequestPacket)
 		encoder := protocol.NewEncoder(conn)
 
+		shell := req.Shell
+		// Substitute a valid shell if the default Linux path was sent to a Windows agent.
+		if runtime.GOOS == "windows" && (shell == "" || shell == "/bin/bash" || shell == "/bin/sh") {
+			shell = "cmd.exe"
+		}
+		// Fall back to /bin/sh if the requested shell doesn't exist.
+		if shell != "cmd.exe" {
+			if _, err := os.Stat(shell); err != nil {
+				if _, err2 := os.Stat("/bin/sh"); err2 == nil {
+					logrus.Warnf("rssh: shell %q not found, falling back to /bin/sh", shell)
+					shell = "/bin/sh"
+				}
+			}
+		}
+
 		cfg := rssh.Config{
 			Password:      req.Password,
 			AuthorizedKey: req.AuthorizedKey,
-			Shell:         req.Shell,
+			Shell:         shell,
 			Port:          uint(req.Port),
 			LHost:         req.LHost,
 			LUser:         req.LUser,
@@ -382,17 +398,43 @@ func HandleConn(conn net.Conn) {
 			NoShell:       req.NoShell,
 		}
 
-		// Acknowledge before blocking on Start.
+		// Bind (or dial home) first — only ack after the listener is ready.
+		ln, server, err := rssh.Listen(cfg)
+		if err != nil {
+			if encErr := encoder.Encode(protocol.RsshStartResponsePacket{Err: true, ErrString: err.Error()}); encErr != nil {
+				logrus.Error(encErr)
+			}
+			return
+		}
+
 		if err := encoder.Encode(protocol.RsshStartResponsePacket{}); err != nil {
+			ln.Close()
 			logrus.Error(err)
 			return
 		}
 
 		go func() {
-			if err := rssh.Start(cfg); err != nil {
+			defer func() {
+				if r := recover(); r != nil {
+					logrus.Errorf("rssh: panic: %v", r)
+				}
+			}()
+			if err := rssh.Serve(ln, server); err != nil {
 				logrus.Errorf("rssh: %v", err)
 			}
 		}()
+
+	case *protocol.RsshStopRequestPacket:
+		encoder := protocol.NewEncoder(conn)
+		err := rssh.Stop()
+		resp := protocol.RsshStopResponsePacket{}
+		if err != nil {
+			resp.Err = true
+			resp.ErrString = err.Error()
+		}
+		if encErr := encoder.Encode(resp); encErr != nil {
+			logrus.Error(encErr)
+		}
 
 	}
 }

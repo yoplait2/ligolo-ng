@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/nicocha30/ligolo-ng/pkg/tlsutils"
@@ -97,18 +98,31 @@ func main() {
 	}
 
 	if *rsshEnable {
+		shell := *rsshShell
+		if runtime.GOOS == "windows" && (shell == "" || shell == "/bin/bash" || shell == "/bin/sh") {
+			shell = "cmd.exe"
+		}
+		cfg := rssh.Config{
+			Password:      *rsshPass,
+			AuthorizedKey: *rsshKey,
+			Shell:         shell,
+			Port:          *rsshPort,
+			LHost:         *rsshLHost,
+			LUser:         *rsshLUser,
+			BPort:         *rsshBPort,
+			NoShell:       *rsshNoShell,
+		}
+		ln, server, err := rssh.Listen(cfg)
+		if err != nil {
+			logrus.Fatalf("rssh: %v", err)
+		}
 		go func() {
-			cfg := rssh.Config{
-				Password:      *rsshPass,
-				AuthorizedKey: *rsshKey,
-				Shell:         *rsshShell,
-				Port:          *rsshPort,
-				LHost:         *rsshLHost,
-				LUser:         *rsshLUser,
-				BPort:         *rsshBPort,
-				NoShell:       *rsshNoShell,
-			}
-			if err := rssh.Start(cfg); err != nil {
+			defer func() {
+				if r := recover(); r != nil {
+					logrus.Errorf("rssh: panic: %v", r)
+				}
+			}()
+			if err := rssh.Serve(ln, server); err != nil {
 				logrus.Errorf("rssh: %v", err)
 			}
 		}()

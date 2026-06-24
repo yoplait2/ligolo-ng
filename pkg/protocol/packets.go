@@ -48,6 +48,8 @@ const (
 	MessageRsshStartResponse
 	MessageRsshRelayRequest
 	MessageRsshRelayResponse
+	MessageRsshStopRequest
+	MessageRsshStopResponse
 )
 
 const (
@@ -233,6 +235,15 @@ type RsshRelayRequestPacket struct {
 
 // RsshRelayResponsePacket is the agent's ack before the raw SSH relay begins.
 type RsshRelayResponsePacket struct {
+	Err       bool
+	ErrString string
+}
+
+// RsshStopRequestPacket asks the agent to stop the embedded SSH server.
+type RsshStopRequestPacket struct{}
+
+// RsshStopResponsePacket is the agent's reply to RsshStopRequestPacket.
+type RsshStopResponsePacket struct {
 	Err       bool
 	ErrString string
 }

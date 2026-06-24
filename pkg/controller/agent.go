@@ -69,6 +69,28 @@ func (la *LigoloAgent) OpenRsshRelay(port uint32) (net.Conn, error) {
 	return conn, nil
 }
 
+// StopRssh instructs the agent to stop the embedded SSH server.
+func (la *LigoloAgent) StopRssh() error {
+	conn, err := la.Session.Open()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	enc := protocol.NewEncoderDecoder(conn)
+	if err := enc.Encode(protocol.RsshStopRequestPacket{}); err != nil {
+		return err
+	}
+	if err := enc.Decode(); err != nil {
+		return err
+	}
+	resp := enc.Payload.(*protocol.RsshStopResponsePacket)
+	if resp.Err {
+		return fmt.Errorf("agent rssh stop error: %s", resp.ErrString)
+	}
+	return nil
+}
+
 // StartRssh instructs the agent to start its embedded reverse-SSH server with
 // the supplied configuration. It blocks until the agent acknowledges the request.
 func (la *LigoloAgent) StartRssh(req protocol.RsshStartRequestPacket) error {

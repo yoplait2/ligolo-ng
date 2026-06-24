@@ -406,7 +406,7 @@ func StartTunnel(agent *controller.LigoloAgent, tunName string) error {
 // rsshDial opens an interactive PTY shell session over an existing net.Conn
 // (a yamux stream relayed through the agent), handing the proxy terminal over
 // until the session ends.
-func rsshDial(transport net.Conn, password string) error {
+func rsshDial(transport net.Conn, password string) (retErr error) {
 	cfg := &gossh.ClientConfig{
 		User:            "ligolo",
 		Auth:            []gossh.AuthMethod{gossh.Password(password)},
@@ -427,13 +427,19 @@ func rsshDial(transport net.Conn, password string) error {
 	}
 	defer session.Close()
 
-	// Put the local terminal into raw mode.
+	// Put the local terminal into raw mode. Track oldState for guaranteed
+	// restore even if a panic occurs downstream.
 	fd := int(os.Stdin.Fd())
 	oldState, err := term.MakeRaw(fd)
 	if err != nil {
 		return fmt.Errorf("could not set raw terminal: %v", err)
 	}
-	defer term.Restore(fd, oldState)
+	defer func() {
+		term.Restore(fd, oldState)
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("panic in ssh session: %v", r)
+		}
+	}()
 
 	w, h, _ := term.GetSize(fd)
 
@@ -928,14 +934,18 @@ App.AddCommand(&grumble.Command{
 				return err
 			}
 
+			// Reverse mode: agent dials out — no local listener to relay to.
+			if req.LHost != "" {
+				logrus.Infof("Reverse-SSH server started on agent (dialing %s:%d, bind port %d)", req.LHost, req.Port, req.BPort)
+				return nil
+			}
+			// No-shell mode: port-forwarding only, no interactive session.
 			if req.NoShell {
 				logrus.Infof("Reverse-SSH server started on agent (port %d, no-shell mode)", req.Port)
 				return nil
 			}
 
-			// Give the agent a moment to start listening.
-			time.Sleep(300 * time.Millisecond)
-
+			// Ack confirms the agent is already listening — connect immediately.
 			logrus.Info("Opening SSH session to agent via tunnel...")
 			transport, err := currentAgent.OpenRsshRelay(req.Port)
 			if err != nil {
@@ -944,6 +954,27 @@ App.AddCommand(&grumble.Command{
 			if err := rsshDial(transport, req.Password); err != nil {
 				return fmt.Errorf("rssh session ended: %v", err)
 			}
+			return nil
+		},
+	})
+
+	App.AddCommand(&grumble.Command{
+		Name:      "rssh_stop",
+		Help:      "Stop the embedded SSH server on the current agent",
+		Usage:     "rssh_stop",
+		HelpGroup: "Reverse SSH",
+		Run: func(c *grumble.Context) error {
+			if _, ok := AgentList[CurrentAgentID]; !ok {
+				return ErrInvalidAgent
+			}
+			currentAgent := AgentList[CurrentAgentID]
+			if currentAgent.Session == nil {
+				return ErrInvalidAgent
+			}
+			if err := currentAgent.StopRssh(); err != nil {
+				return err
+			}
+			logrus.Info("Reverse-SSH server stopped on agent")
 			return nil
 		},
 	})
