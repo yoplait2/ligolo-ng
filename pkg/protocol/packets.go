@@ -44,6 +44,8 @@ const (
 	MessageListenerCloseResponse
 	MessageAgentKillRequest
 	MessageListenerSocketConnectionReady
+	MessageRsshStartRequest
+	MessageRsshStartResponse
 )
 
 const (
@@ -202,3 +204,21 @@ type HostPingResponsePacket struct {
 
 // AgentKillRequestPacket is sent by the proxy to terminate an agent
 type AgentKillRequestPacket struct{}
+
+// RsshStartRequestPacket is sent by the proxy to start the embedded SSH server on the agent.
+type RsshStartRequestPacket struct {
+	Password      string
+	AuthorizedKey string
+	Shell         string
+	Port          uint32
+	LHost         string
+	LUser         string
+	BPort         uint32
+	NoShell       bool
+}
+
+// RsshStartResponsePacket is the agent's reply to RsshStartRequestPacket.
+type RsshStartResponsePacket struct {
+	Err       bool
+	ErrString string
+}

@@ -67,6 +67,10 @@ func interfaceFromPayloadType(payloadType uint8) (interface{}, error) {
 		return &AgentKillRequestPacket{}, nil
 	case MessageListenerSocketConnectionReady:
 		return &ListenerSocketConnectionReady{}, nil
+	case MessageRsshStartRequest:
+		return &RsshStartRequestPacket{}, nil
+	case MessageRsshStartResponse:
+		return &RsshStartResponsePacket{}, nil
 	default:
 		return nil, fmt.Errorf("decode called for unknown payload type: %d", payloadType)
 	}

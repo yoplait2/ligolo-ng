@@ -44,6 +44,29 @@ func (la *LigoloAgent) Alive() bool {
 	return false
 }
 
+// StartRssh instructs the agent to start its embedded reverse-SSH server with
+// the supplied configuration. It blocks until the agent acknowledges the request.
+func (la *LigoloAgent) StartRssh(req protocol.RsshStartRequestPacket) error {
+	conn, err := la.Session.Open()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	enc := protocol.NewEncoderDecoder(conn)
+	if err := enc.Encode(req); err != nil {
+		return err
+	}
+	if err := enc.Decode(); err != nil {
+		return err
+	}
+	resp := enc.Payload.(*protocol.RsshStartResponsePacket)
+	if resp.Err {
+		return fmt.Errorf("agent rssh error: %s", resp.ErrString)
+	}
+	return nil
+}
+
 func (la *LigoloAgent) Kill() error {
 	// Open a new Yamux Session
 	conn, err := la.Session.Open()

@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nicocha30/ligolo-ng/pkg/agent/neterror"
+	"github.com/nicocha30/ligolo-ng/pkg/agent/rssh"
 	"github.com/nicocha30/ligolo-ng/pkg/agent/smartping"
 	"github.com/nicocha30/ligolo-ng/pkg/protocol"
 	"github.com/nicocha30/ligolo-ng/pkg/relay"
@@ -350,6 +351,33 @@ func HandleConn(conn net.Conn) {
 
 	case *protocol.AgentKillRequestPacket:
 		os.Exit(0)
+
+	case *protocol.RsshStartRequestPacket:
+		req := e.Payload.(*protocol.RsshStartRequestPacket)
+		encoder := protocol.NewEncoder(conn)
+
+		cfg := rssh.Config{
+			Password:      req.Password,
+			AuthorizedKey: req.AuthorizedKey,
+			Shell:         req.Shell,
+			Port:          uint(req.Port),
+			LHost:         req.LHost,
+			LUser:         req.LUser,
+			BPort:         uint(req.BPort),
+			NoShell:       req.NoShell,
+		}
+
+		// Acknowledge before blocking on Start.
+		if err := encoder.Encode(protocol.RsshStartResponsePacket{}); err != nil {
+			logrus.Error(err)
+			return
+		}
+
+		go func() {
+			if err := rssh.Start(cfg); err != nil {
+				logrus.Errorf("rssh: %v", err)
+			}
+		}()
 
 	}
 }

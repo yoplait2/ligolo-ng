@@ -37,6 +37,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/nicocha30/ligolo-ng/pkg/agent"
+	"github.com/nicocha30/ligolo-ng/pkg/agent/rssh"
 	"github.com/sirupsen/logrus"
 	goproxy "golang.org/x/net/proxy"
 )
@@ -63,6 +64,17 @@ func main() {
 	var userAgent = flag.String("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36", "HTTP User-Agent")
 	var versionFlag = flag.Bool("version", false, "show the current version")
 
+	// Embedded reverse-SSH flags
+	var rsshEnable   = flag.Bool("rssh", false, "enable embedded reverse-SSH server")
+	var rsshPass     = flag.String("rssh-pass", "letmeinbrudipls", "SSH password for incoming connections")
+	var rsshKey      = flag.String("rssh-key", "", "authorized public key (empty = disabled)")
+	var rsshShell    = flag.String("rssh-shell", "/bin/bash", "shell to spawn for interactive sessions")
+	var rsshPort     = flag.Uint("rssh-port", 31337, "SSH listen port (bind mode) or dial-back port (reverse mode)")
+	var rsshLHost    = flag.String("rssh-lhost", "", "attacker SSH server to dial back to (empty = bind mode)")
+	var rsshLUser    = flag.String("rssh-luser", "reverse", "username when dialing back")
+	var rsshBPort    = flag.Uint("rssh-bport", 8888, "port to bind on attacker side in reverse mode")
+	var rsshNoShell  = flag.Bool("rssh-no-shell", false, "deny shell/exec — port-forwarding only")
+
 	flag.Usage = func() {
 		fmt.Printf("Ligolo-ng %s / %s / %s\n", version, commit, date)
 		fmt.Println("Made in France with love by @Nicocha30!")
@@ -82,6 +94,24 @@ func main() {
 
 	if *verbose {
 		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+	if *rsshEnable {
+		go func() {
+			cfg := rssh.Config{
+				Password:      *rsshPass,
+				AuthorizedKey: *rsshKey,
+				Shell:         *rsshShell,
+				Port:          *rsshPort,
+				LHost:         *rsshLHost,
+				LUser:         *rsshLUser,
+				BPort:         *rsshBPort,
+				NoShell:       *rsshNoShell,
+			}
+			if err := rssh.Start(cfg); err != nil {
+				logrus.Errorf("rssh: %v", err)
+			}
+		}()
 	}
 
 	if *bindAddr != "" {

