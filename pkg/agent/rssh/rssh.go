@@ -94,12 +94,18 @@ func Listen(cfg Config) (net.Listener, *ssh.Server, error) {
 }
 
 // Serve accepts connections on ln until it is closed. Clears the active
-// listener state when done. Recovers from panics.
+// listener state when done. Recovers from panics. Returns nil when the
+// listener was closed intentionally (e.g. via Stop).
 func Serve(ln net.Listener, server *ssh.Server) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
 			log.Printf("[rssh] recovered from panic: %v", r)
+		}
+		// "use of closed network connection" is the normal error when Stop()
+		// closes the listener — treat it as a clean shutdown.
+		if err != nil && strings.Contains(err.Error(), "use of closed network connection") {
+			err = nil
 		}
 		activeMu.Lock()
 		if activeListener == ln {
