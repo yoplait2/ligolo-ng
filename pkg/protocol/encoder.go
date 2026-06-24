@@ -70,6 +70,10 @@ func payloadTypeFromInterface(payload interface{}) (uint8, error) {
 		return MessageRsshStartRequest, nil
 	case RsshStartResponsePacket:
 		return MessageRsshStartResponse, nil
+	case RsshRelayRequestPacket:
+		return MessageRsshRelayRequest, nil
+	case RsshRelayResponsePacket:
+		return MessageRsshRelayResponse, nil
 	default:
 		return 0, fmt.Errorf("payloadTypeFromInterface called for unknown payload type: %v", payload)
 	}

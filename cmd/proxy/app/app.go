@@ -403,9 +403,10 @@ func StartTunnel(agent *controller.LigoloAgent, tunName string) error {
 	return nil
 }
 
-// rsshDial connects to the agent's embedded SSH server and opens an interactive
-// PTY shell session, handing over the proxy terminal until the session ends.
-func rsshDial(addr, password string) error {
+// rsshDial opens an interactive PTY shell session over an existing net.Conn
+// (a yamux stream relayed through the agent), handing the proxy terminal over
+// until the session ends.
+func rsshDial(transport net.Conn, password string) error {
 	cfg := &gossh.ClientConfig{
 		User:            "ligolo",
 		Auth:            []gossh.AuthMethod{gossh.Password(password)},
@@ -413,10 +414,11 @@ func rsshDial(addr, password string) error {
 		Timeout:         10 * time.Second,
 	}
 
-	client, err := gossh.Dial("tcp", addr, cfg)
+	sshConn, chans, reqs, err := gossh.NewClientConn(transport, "agent", cfg)
 	if err != nil {
 		return err
 	}
+	client := gossh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
 
 	session, err := client.NewSession()
@@ -931,18 +933,15 @@ App.AddCommand(&grumble.Command{
 				return nil
 			}
 
-			// Extract agent IP and dial the SSH server for an interactive shell.
-			agentHost, _, err := net.SplitHostPort(currentAgent.Session.RemoteAddr().String())
-			if err != nil {
-				return fmt.Errorf("could not parse agent address: %v", err)
-			}
-			sshAddr := net.JoinHostPort(agentHost, fmt.Sprintf("%d", req.Port))
-
 			// Give the agent a moment to start listening.
 			time.Sleep(300 * time.Millisecond)
 
-			logrus.Infof("Connecting to agent SSH server at %s ...", sshAddr)
-			if err := rsshDial(sshAddr, req.Password); err != nil {
+			logrus.Info("Opening SSH session to agent via tunnel...")
+			transport, err := currentAgent.OpenRsshRelay(req.Port)
+			if err != nil {
+				return fmt.Errorf("rssh relay error: %v", err)
+			}
+			if err := rsshDial(transport, req.Password); err != nil {
 				return fmt.Errorf("rssh session ended: %v", err)
 			}
 			return nil

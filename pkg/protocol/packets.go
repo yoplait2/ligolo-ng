@@ -46,6 +46,8 @@ const (
 	MessageListenerSocketConnectionReady
 	MessageRsshStartRequest
 	MessageRsshStartResponse
+	MessageRsshRelayRequest
+	MessageRsshRelayResponse
 )
 
 const (
@@ -219,6 +221,18 @@ type RsshStartRequestPacket struct {
 
 // RsshStartResponsePacket is the agent's reply to RsshStartRequestPacket.
 type RsshStartResponsePacket struct {
+	Err       bool
+	ErrString string
+}
+
+// RsshRelayRequestPacket asks the agent to dial its local SSH server and relay
+// the connection back over the current yamux stream.
+type RsshRelayRequestPacket struct {
+	Port uint32
+}
+
+// RsshRelayResponsePacket is the agent's ack before the raw SSH relay begins.
+type RsshRelayResponsePacket struct {
 	Err       bool
 	ErrString string
 }

@@ -44,6 +44,31 @@ func (la *LigoloAgent) Alive() bool {
 	return false
 }
 
+// OpenRsshRelay opens a yamux stream to the agent, asks it to dial its local
+// SSH server at port, and returns the stream ready for use as an SSH transport.
+func (la *LigoloAgent) OpenRsshRelay(port uint32) (net.Conn, error) {
+	conn, err := la.Session.Open()
+	if err != nil {
+		return nil, err
+	}
+
+	enc := protocol.NewEncoderDecoder(conn)
+	if err := enc.Encode(protocol.RsshRelayRequestPacket{Port: port}); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := enc.Decode(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp := enc.Payload.(*protocol.RsshRelayResponsePacket)
+	if resp.Err {
+		conn.Close()
+		return nil, fmt.Errorf("agent relay error: %s", resp.ErrString)
+	}
+	return conn, nil
+}
+
 // StartRssh instructs the agent to start its embedded reverse-SSH server with
 // the supplied configuration. It blocks until the agent acknowledges the request.
 func (la *LigoloAgent) StartRssh(req protocol.RsshStartRequestPacket) error {

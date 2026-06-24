@@ -352,6 +352,21 @@ func HandleConn(conn net.Conn) {
 	case *protocol.AgentKillRequestPacket:
 		os.Exit(0)
 
+	case *protocol.RsshRelayRequestPacket:
+		relayReq := e.Payload.(*protocol.RsshRelayRequestPacket)
+		encoder := protocol.NewEncoder(conn)
+
+		sshConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", relayReq.Port))
+		if err != nil {
+			encoder.Encode(protocol.RsshRelayResponsePacket{Err: true, ErrString: err.Error()})
+			return
+		}
+		if err := encoder.Encode(protocol.RsshRelayResponsePacket{}); err != nil {
+			sshConn.Close()
+			return
+		}
+		relay.StartRelay(sshConn, conn)
+
 	case *protocol.RsshStartRequestPacket:
 		req := e.Payload.(*protocol.RsshStartRequestPacket)
 		encoder := protocol.NewEncoder(conn)
