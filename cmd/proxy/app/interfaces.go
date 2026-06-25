@@ -315,13 +315,13 @@ func init() {
 			var possibleRoutes []string
 			for _, ifaceInfo := range CurrentAgent.Network {
 				for _, address := range ifaceInfo.Addresses {
-					ip, _, err := net.ParseCIDR(address)
+					ip, ipNet, err := net.ParseCIDR(address)
 					if err != nil {
 						continue
 					}
 					if !ip.IsLoopback() {
 						if ip.To4() != nil || c.Flags.Bool("with-ipv6") {
-							possibleRoutes = append(possibleRoutes, address)
+							possibleRoutes = append(possibleRoutes, ipNet.String())
 						}
 					}
 				}
